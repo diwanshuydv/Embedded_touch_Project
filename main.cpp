@@ -31,7 +31,8 @@ static const int kStrokeRadius = 4;
 static const int kMinStrokePixels = 8;
 static const uintptr_t kSdramBase = 0xD0000000;
 
-static const int kButtonY = 198;
+static const int kCanvasTop = 30;
+static const int kButtonY = 202;
 static const int kButtonH = 34;
 static const int kPredictButtonX = 20;
 static const int kPredictButtonW = 130;
@@ -85,12 +86,12 @@ static bool point_in_button_area(int x, int y) {
 }
 
 static bool point_in_canvas(int x, int y) {
-    return x >= 0 && x < kScreenWidth && y >= 44 && y < kCanvasBottom;
+    return x >= 0 && x < kScreenWidth && y >= kCanvasTop && y < kCanvasBottom;
 }
 
 static void draw_canvas_area(void) {
-    gfx_drawRect(0, 44, kScreenWidth, kCanvasBottom - 44, GFX_COLOR_CYAN);
-    gfx_drawRect(1, 45, kScreenWidth - 2, kCanvasBottom - 46, GFX_COLOR_CYAN);
+    gfx_drawRect(0, kCanvasTop, kScreenWidth, kCanvasBottom - kCanvasTop, GFX_COLOR_CYAN);
+    gfx_drawRect(1, kCanvasTop + 1, kScreenWidth - 2, kCanvasBottom - kCanvasTop - 2, GFX_COLOR_CYAN);
 }
 
 static void draw_button(int x, int y, int w, int h, const char *label, uint16_t fill_color) {
@@ -113,8 +114,7 @@ static void show_prompt(const char *status) {
     gfx_setCursor(10, 8);
     gfx_setTextColor(GFX_COLOR_WHITE, GFX_COLOR_BLACK);
     gfx_puts((char *)"Draw one digit");
-    gfx_setCursor(10, 24);
-    gfx_puts((char *)status);
+    (void)status;
     draw_canvas_area();
     draw_controls();
     lcd_show_frame();
@@ -129,7 +129,7 @@ static void mark_canvas_point(int x, int y) {
 
             int px = x + dx;
             int py = y + dy;
-            if (px < 0 || px >= kScreenWidth || py < 44 || py >= kCanvasBottom) {
+            if (px < 0 || px >= kScreenWidth || py < kCanvasTop || py >= kCanvasBottom) {
                 continue;
             }
 
