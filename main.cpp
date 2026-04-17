@@ -29,8 +29,15 @@ static const int kMnistSize = 28;
 static const int kMnistDigitBox = 20;
 static const int kStrokeRadius = 4;
 static const int kMinStrokePixels = 8;
-static const int kReleaseSamplesForInference = 2;
 static const uintptr_t kSdramBase = 0xD0000000;
+
+static const int kButtonY = 198;
+static const int kButtonH = 34;
+static const int kPredictButtonX = 20;
+static const int kPredictButtonW = 130;
+static const int kResetButtonX = 170;
+static const int kResetButtonW = 130;
+static const int kCanvasBottom = kButtonY - 6;
 
 static uint8_t * const drawing_canvas = (uint8_t *)(kSdramBase + 0x80000);
 static uint8_t mnist_canvas[kMnistSize * kMnistSize];
@@ -61,13 +68,55 @@ static void clear_drawing_state(void) {
     stroke_pixels = 0;
 }
 
+static bool point_in_rect(int x, int y, int rect_x, int rect_y, int rect_w, int rect_h) {
+    return x >= rect_x && x < (rect_x + rect_w) && y >= rect_y && y < (rect_y + rect_h);
+}
+
+static bool point_in_predict_button(int x, int y) {
+    return point_in_rect(x, y, kPredictButtonX, kButtonY, kPredictButtonW, kButtonH);
+}
+
+static bool point_in_reset_button(int x, int y) {
+    return point_in_rect(x, y, kResetButtonX, kButtonY, kResetButtonW, kButtonH);
+}
+
+static bool point_in_button_area(int x, int y) {
+    return point_in_predict_button(x, y) || point_in_reset_button(x, y);
+}
+
+static bool point_in_canvas(int x, int y) {
+    return x >= 0 && x < kScreenWidth && y >= 44 && y < kCanvasBottom;
+}
+
+static void draw_canvas_area(void) {
+    gfx_drawRect(0, 44, kScreenWidth, kCanvasBottom - 44, GFX_COLOR_CYAN);
+    gfx_drawRect(1, 45, kScreenWidth - 2, kCanvasBottom - 46, GFX_COLOR_CYAN);
+}
+
+static void draw_button(int x, int y, int w, int h, const char *label, uint16_t fill_color) {
+    gfx_fillRoundRect(x, y, w, h, 5, fill_color);
+    gfx_drawRoundRect(x, y, w, h, 5, GFX_COLOR_WHITE);
+    gfx_setTextColor(GFX_COLOR_WHITE, fill_color);
+    gfx_setCursor(x + 32, y + 11);
+    gfx_puts((char *)label);
+    gfx_setTextColor(GFX_COLOR_WHITE, GFX_COLOR_BLACK);
+}
+
+static void draw_controls(void) {
+    gfx_fillRect(0, kCanvasBottom, kScreenWidth, kScreenHeight - kCanvasBottom, GFX_COLOR_BLACK);
+    draw_button(kPredictButtonX, kButtonY, kPredictButtonW, kButtonH, "Predict", GFX_COLOR_BLUE);
+    draw_button(kResetButtonX, kButtonY, kResetButtonW, kButtonH, "Reset", GFX_COLOR_RED);
+}
+
 static void show_prompt(const char *status) {
     gfx_fillScreen(GFX_COLOR_BLACK);
     gfx_setCursor(10, 8);
     gfx_setTextColor(GFX_COLOR_WHITE, GFX_COLOR_BLACK);
-    gfx_puts((char *)"Draw one digit, then lift");
+    gfx_puts((char *)"Draw one digit");
     gfx_setCursor(10, 24);
     gfx_puts((char *)status);
+    draw_canvas_area();
+    draw_controls();
     lcd_show_frame();
 }
 
@@ -80,7 +129,7 @@ static void mark_canvas_point(int x, int y) {
 
             int px = x + dx;
             int py = y + dy;
-            if (px < 0 || px >= kScreenWidth || py < 0 || py >= kScreenHeight) {
+            if (px < 0 || px >= kScreenWidth || py < 44 || py >= kCanvasBottom) {
                 continue;
             }
 
@@ -157,6 +206,7 @@ static bool build_mnist_canvas(void) {
     if (min_y < 0) min_y = 0;
     if (max_x >= kScreenWidth) max_x = kScreenWidth - 1;
     if (max_y >= kScreenHeight) max_y = kScreenHeight - 1;
+    if (max_y >= kCanvasBottom) max_y = kCanvasBottom - 1;
 
     int src_w = max_x - min_x + 1;
     int src_h = max_y - min_y + 1;
@@ -197,6 +247,30 @@ static void draw_mnist_preview(int origin_x, int origin_y) {
             gfx_fillRect(origin_x + x * scale, origin_y + y * scale, scale, scale, color);
         }
     }
+}
+
+static void show_prediction_result(bool ok, int digit, int confidence) {
+    gfx_fillRect(0, 0, kScreenWidth, 44, GFX_COLOR_BLACK);
+    gfx_setCursor(10, 8);
+    gfx_setTextColor(GFX_COLOR_WHITE, GFX_COLOR_BLACK);
+
+    char result_buf[64];
+    if (ok) {
+        sprintf(result_buf, "Detected: %d  conf: %d%%", digit, confidence);
+        gfx_puts(result_buf);
+        draw_mnist_preview(226, 104);
+        sprintf(result_buf, "Digit=%d Confidence=%d%%\r\n", digit, confidence);
+        usart_send_string(result_buf);
+    } else {
+        gfx_puts((char *)"Could not detect digit");
+        gfx_setCursor(10, 24);
+        gfx_puts((char *)"Draw more or press Reset");
+        usart_send_string("DIGIT_INFERENCE_FAILED\r\n");
+    }
+
+    draw_canvas_area();
+    draw_controls();
+    lcd_show_frame();
 }
 
 static void dense_layer(const float *input,
@@ -298,16 +372,32 @@ int main(void) {
     int last_touch_x = 0;
     int last_touch_y = 0;
     bool drawing = false;
-    bool result_visible = false;
-    int release_samples = 0;
+    bool touch_was_down = false;
 
     while (1) {
         if (touch_read(&touch_x, &touch_y)) {
-            release_samples = 0;
-            if (result_visible) {
+            if (!touch_was_down && point_in_predict_button(touch_x, touch_y)) {
+                int digit = -1;
+                int confidence = 0;
+                bool ok = run_digit_inference(&digit, &confidence);
+                show_prediction_result(ok, digit, confidence);
+                drawing = false;
+                touch_was_down = true;
+                continue;
+            }
+
+            if (!touch_was_down && point_in_reset_button(touch_x, touch_y)) {
                 clear_drawing_state();
                 show_prompt("Ready");
-                result_visible = false;
+                drawing = false;
+                touch_was_down = true;
+                continue;
+            }
+
+            if (point_in_button_area(touch_x, touch_y) || !point_in_canvas(touch_x, touch_y)) {
+                drawing = false;
+                touch_was_down = true;
+                continue;
             }
 
             if (drawing && should_connect_points(last_touch_x, last_touch_y, touch_x, touch_y)) {
@@ -332,39 +422,9 @@ int main(void) {
             usart_send_string(dbg_buf);
         } else {
             if (drawing) {
-                release_samples++;
-                if (release_samples >= kReleaseSamplesForInference) {
-                    drawing = false;
-                    release_samples = 0;
-
-                    int digit = -1;
-                    int confidence = 0;
-                    bool ok = run_digit_inference(&digit, &confidence);
-
-                    gfx_fillRect(0, 0, kScreenWidth, 44, GFX_COLOR_BLACK);
-                    gfx_setCursor(10, 8);
-                    gfx_setTextColor(GFX_COLOR_WHITE, GFX_COLOR_BLACK);
-
-                    char result_buf[64];
-                    if (ok) {
-                        sprintf(result_buf, "Detected: %d  conf: %d%%", digit, confidence);
-                        gfx_puts(result_buf);
-                        gfx_setCursor(10, 24);
-                        gfx_puts((char *)"Touch again to clear");
-                        draw_mnist_preview(226, 148);
-                        sprintf(result_buf, "Digit=%d Confidence=%d%%\r\n", digit, confidence);
-                        usart_send_string(result_buf);
-                    } else {
-                        gfx_puts((char *)"Could not detect digit");
-                        gfx_setCursor(10, 24);
-                        gfx_puts((char *)"Touch again to clear");
-                        usart_send_string("DIGIT_INFERENCE_FAILED\r\n");
-                    }
-
-                    lcd_show_frame();
-                    result_visible = true;
-                }
+                drawing = false;
             }
+            touch_was_down = false;
         }
     }
 }
